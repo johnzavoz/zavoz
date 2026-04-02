@@ -60,25 +60,21 @@ def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
         }],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        # Сначала только метаданные — проверяем длину
+        
         info = ydl.extract_info(url, download=False)
         duration = info.get("duration", 0)
         if duration > 600:
             raise ValueError(f"Видео слишком длинное: {duration // 60} мин. Максимум 10 минут.")
 
-        # Скачиваем
         info = ydl.extract_info(url, download=True)
 
-        # Надёжный способ получить финальный путь — из requested_downloads
         filename = None
         if "requested_downloads" in info and info["requested_downloads"]:
             filename = info["requested_downloads"][0].get("filepath")
 
-        # Запасной вариант — prepare_filename
         if not filename:
             filename = ydl.prepare_filename(info)
 
-        # Если postprocessor поменял расширение — перебираем варианты
         if not os.path.exists(filename):
             base = os.path.splitext(filename)[0]
             for ext in ('mp4', 'mkv', 'webm', 'mov'):
@@ -100,7 +96,6 @@ async def send_video(filename: str, update: Update, info: dict) -> None:
     """Отправляет видео с метаданными. При ошибке — как документ."""
     reply_params = ReplyParameters(message_id=update.message.message_id)
 
-    # Передаём width/height/duration — без них Telegram может показать 0 кб
     duration = int(info.get("duration") or 0)
     width = int(info.get("width") or 0)
     height = int(info.get("height") or 0)
@@ -145,7 +140,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception as e:
                 logger.warning(f"Не удалось отправить гифку: {e}")
 
-    # Проверяем и text, и caption (ссылки в подписях к медиа)
     text = (update.message.text or update.message.caption or "").strip()
 
     if not text:

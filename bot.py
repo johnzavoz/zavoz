@@ -231,7 +231,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # --- Обработка упоминания бота (с фото или без) ---
     # В личке отвечаем всегда, в группе только по тегу/слову
-    if has_mention or is_private:
+    # Если есть валидная ссылка — не триггерим AI, пусть скачивает
+    if (has_mention or is_private) and not is_valid_url(text):
         question = re.sub(rf"@{BOT_USERNAME}", "", text, flags=re.IGNORECASE).strip()
         if not question:
             question = "что на этом фото?" if (has_photo or replied_has_photo) else "прокомментируй это"

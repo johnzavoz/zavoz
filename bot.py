@@ -11,7 +11,7 @@ from telegram import Update, ReactionTypeEmoji, ReplyParameters
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 import yt_dlp
-from openai import OpenAI
+from groq import Groq
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,20 +23,17 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в .env")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY не задан в .env")
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY не задан в .env")
 
 # Имя бота в телеграме (без @), используется для определения упоминаний
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "zavozik")  # поменяй в .env если другое
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "zavoztestbot")  # поменяй в .env если другое
 
-gemini_client = OpenAI(
-    api_key=GEMINI_API_KEY,
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-)
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ID пользователя которому отвечаем гифкой
 TARGET_USER_ID = 5002964279
@@ -69,8 +66,8 @@ def is_mention(text: str) -> bool:
     return f"@{BOT_USERNAME}".lower() in text.lower()
 
 
-def ask_gemini(question: str, context_messages: list[dict]) -> str:
-    """Отправляет вопрос в Gemini с контекстом переписки."""
+def ask_ai(question: str, context_messages: list[dict]) -> str:
+    """Отправляет вопрос в Groq с контекстом переписки."""
     messages = [{"role": "system", "content": GEMINI_SYSTEM_PROMPT}]
 
     if context_messages:
@@ -88,8 +85,8 @@ def ask_gemini(question: str, context_messages: list[dict]) -> str:
 
     messages.append({"role": "user", "content": question})
 
-    response = gemini_client.chat.completions.create(
-        model="gemini-2.0-flash",
+    response = groq_client.chat.completions.create(
+        model="llama-4-scout-17b-16e-instruct",
         messages=messages,
         max_tokens=1000,
     )
@@ -228,10 +225,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.info(f"Вопрос боту от {sender_name}: {question}")
 
         try:
-            answer = await asyncio.to_thread(ask_gemini, question, context_msgs)
+            answer = await asyncio.to_thread(ask_ai, question, context_msgs)
             await update.message.reply_text(answer)
         except Exception as e:
-            logger.error(f"Ошибка Gemini API: {e}")
+            logger.error(f"Ошибка Groq API: {e}")
             await update.message.reply_text("❌ Не смог ответить, попробуй позже.")
         return
 

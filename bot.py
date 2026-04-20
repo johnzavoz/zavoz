@@ -53,7 +53,7 @@ URL_PATTERN = re.compile(
     r'https?://(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|instagram\.com/(reels?|p)/|twitter\.com|x\.com|youtube\.com|youtu\.be)'
 )
 
-GEMINI_SYSTEM_PROMPT = """Ты — Завозик, остроумный и саркастичный участник чата. 
+SYSTEM_PROMPT = """Ты — Завозик, остроумный и саркастичный участник чата. 
 Отвечай коротко и по делу, на том же языке что и вопрос.
 Можешь шутить, но не будь грубым. Если тебя спрашивают про правдивость чего-то — оценивай критически."""
 
@@ -86,7 +86,7 @@ def ask_ai(question: str, context_messages: list[dict]) -> str:
     messages.append({"role": "user", "content": question})
 
     response = groq_client.chat.completions.create(
-        model="llama-4-scout-17b-16e-instruct",
+        model="llama3-8b-8192",
         messages=messages,
         max_tokens=1000,
     )

@@ -31,7 +31,7 @@ if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY не задан в .env")
 
 # Имя бота в телеграме (без @), используется для определения упоминаний
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "zavoztestbot")  # поменяй в .env если другое
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "zavozik")  # поменяй в .env если другое
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -53,7 +53,7 @@ URL_PATTERN = re.compile(
     r'https?://(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|instagram\.com/(reels?|p)/|twitter\.com|x\.com|youtube\.com|youtu\.be)'
 )
 
-SYSTEM_PROMPT = """Ты — Завозик, остроумный и саркастичный участник чата. 
+GEMINI_SYSTEM_PROMPT = """Ты — Завозик, остроумный и саркастичный участник чата. 
 Отвечай коротко и по делу, на том же языке что и вопрос.
 Можешь шутить, но не будь грубым. Если тебя спрашивают про правдивость чего-то — оценивай критически."""
 

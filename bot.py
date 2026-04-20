@@ -69,14 +69,6 @@ def is_mention(text: str) -> bool:
     return f"@{BOT_USERNAME}".lower() in t or "завоз" in t or "завозик" in t
 
 
-FACTCHECK_KEYWORDS = ["это правда", "правда ли", "проверь", "фейк", "fake", "fact check", "правдивость", "достоверно", "источник"]
-
-def needs_factcheck(question: str) -> bool:
-    """Определяет нужен ли поиск для проверки факта."""
-    q = question.lower()
-    return any(kw in q for kw in FACTCHECK_KEYWORDS)
-
-
 def ask_ai(question: str, context_messages: list[dict], image_base64: str = None, image_mime: str = "image/jpeg") -> str:
     """Отправляет вопрос в Groq с контекстом переписки и опциональным изображением."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -109,44 +101,12 @@ def ask_ai(question: str, context_messages: list[dict], image_base64: str = None
 
     messages.append({"role": "user", "content": user_content})
 
-    # Включаем веб-поиск если вопрос про проверку фактов
-    use_search = needs_factcheck(question) or (context_messages and any(
-        needs_factcheck(m.get("text", "")) for m in context_messages
-    ))
-
-    kwargs = {
-        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "messages": messages,
-        "max_tokens": 1000,
-    }
-
-    if use_search:
-        logger.info("Включаем веб-поиск для факт-чекинга")
-        kwargs["tools"] = [{"type": "web_search"}]
-
-    response = groq_client.chat.completions.create(**kwargs)
-
-    # Если модель использовала поиск — собираем финальный ответ
-    msg = response.choices[0].message
-    if hasattr(msg, "tool_calls") and msg.tool_calls:
-        # Добавляем ответ модели с tool_calls в историю
-        messages.append(msg)
-        # Добавляем результаты поиска
-        for tool_call in msg.tool_calls:
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": tool_call.function.arguments,
-            })
-        # Получаем финальный ответ
-        final = groq_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=messages,
-            max_tokens=1000,
-        )
-        return final.choices[0].message.content.strip()
-
-    return msg.content.strip()
+    response = groq_client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        messages=messages,
+        max_tokens=1000,
+    )
+    return response.choices[0].message.content.strip()
 
 
 def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
@@ -272,7 +232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     replied_has_photo = bool(update.message.reply_to_message and update.message.reply_to_message.photo)
 
     # --- Обработка упоминания бота (с фото или без) ---
-    # В личке отвечаем всегда, в группе только по тегу
+    # В личке отвечаем всегда, в группе только по тегу/слову
     if has_mention or is_private:
         question = re.sub(rf"@{BOT_USERNAME}", "", text, flags=re.IGNORECASE).strip()
         if not question:

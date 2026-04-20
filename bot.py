@@ -31,7 +31,7 @@ if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY не задан в .env")
 
 # Имя бота в телеграме (без @), используется для определения упоминаний
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "zavozik")  # поменяй в .env если другое
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "zavoztestbot")  # поменяй в .env если другое
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -86,7 +86,7 @@ def ask_ai(question: str, context_messages: list[dict]) -> str:
     messages.append({"role": "user", "content": question})
 
     response = groq_client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
         messages=messages,
         max_tokens=1000,
     )

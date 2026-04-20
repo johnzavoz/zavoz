@@ -5,12 +5,13 @@ import random
 import asyncio
 import shutil
 import tempfile
-from collections import defaultdict
+from collections import defaultdict, deque
 from dotenv import load_dotenv
 from telegram import Update, ReactionTypeEmoji, ReplyParameters
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 import yt_dlp
+from openai import OpenAI
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,9 +23,20 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в .env")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY не задан в .env")
+
+# Имя бота в телеграме (без @), используется для определения упоминаний
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "zavozik")  # поменяй в .env если другое
+
+gemini_client = OpenAI(
+    api_key=GEMINI_API_KEY,
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+)
 
 # ID пользователя которому отвечаем гифкой
 TARGET_USER_ID = 5002964279
@@ -36,19 +48,58 @@ REACTIONS = ["🔥", "👀", "🤡", "💯"]
 
 message_counter: dict[int, int] = defaultdict(int)
 
+# История чата: chat_id -> deque последних 30 сообщений
+# Каждое сообщение: {"name": "Имя", "text": "текст"}
+chat_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=30))
+
 URL_PATTERN = re.compile(
     r'https?://(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|instagram\.com/(reels?|p)/|twitter\.com|x\.com|youtube\.com|youtu\.be)'
 )
 
+GEMINI_SYSTEM_PROMPT = """Ты — Завозик, остроумный и саркастичный участник чата. 
+Отвечай коротко и по делу, на том же языке что и вопрос.
+Можешь шутить, но не будь грубым. Если тебя спрашивают про правдивость чего-то — оценивай критически."""
+
+
 def is_valid_url(text: str) -> bool:
     return bool(URL_PATTERN.search(text))
+
+
+def is_mention(text: str) -> bool:
+    return f"@{BOT_USERNAME}".lower() in text.lower()
+
+
+def ask_gemini(question: str, context_messages: list[dict]) -> str:
+    """Отправляет вопрос в Gemini с контекстом переписки."""
+    messages = [{"role": "system", "content": GEMINI_SYSTEM_PROMPT}]
+
+    if context_messages:
+        context_text = "\n".join(
+            f"{m['name']}: {m['text']}" for m in context_messages
+        )
+        messages.append({
+            "role": "user",
+            "content": f"Контекст переписки перед вопросом:\n{context_text}"
+        })
+        messages.append({
+            "role": "assistant",
+            "content": "Понял контекст, жду вопрос."
+        })
+
+    messages.append({"role": "user", "content": question})
+
+    response = gemini_client.chat.completions.create(
+        model="gemini-2.0-flash",
+        messages=messages,
+        max_tokens=1000,
+    )
+    return response.choices[0].message.content.strip()
 
 
 def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
     """Скачивает видео в tmp_dir и возвращает (путь к файлу, info dict)."""
     ydl_opts = {
         'outtmpl': os.path.join(tmp_dir, '%(id)s.%(ext)s'),
-        # Ограничение 50 МБ — максимум для Telegram Bot API через reply_video
         'format': 'best[ext=mp4][filesize<50M]/best[filesize<50M]/best',
         'quiet': True,
         'merge_output_format': 'mp4',
@@ -60,7 +111,6 @@ def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
         }],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        
         info = ydl.extract_info(url, download=False)
         duration = info.get("duration", 0)
         if duration > 600:
@@ -124,13 +174,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     chat_id = update.message.chat_id
+    user = update.message.from_user
+    text = (update.message.text or update.message.caption or "").strip()
+
+    # --- Счётчик сообщений ---
     message_counter[chat_id] += 1
     if message_counter[chat_id] >= 150:
         message_counter[chat_id] = 0
         await update.message.reply_text("а я считаю это желтуха")
 
-    # Гифка целевому пользователю с шансом 1% — на любое сообщение, включая медиа
-    if update.message.from_user and update.message.from_user.id == TARGET_USER_ID:
+    # --- Гифка целевому пользователю с шансом 1% ---
+    if user and user.id == TARGET_USER_ID:
         if random.random() < 0.01:
             try:
                 await update.message.reply_animation(
@@ -140,12 +194,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception as e:
                 logger.warning(f"Не удалось отправить гифку: {e}")
 
-    text = (update.message.text or update.message.caption or "").strip()
-
     if not text:
         return
 
-    # Реакция на любое сообщение с шансом 4%
+    # --- Сохраняем сообщение в историю чата ---
+    sender_name = (user.first_name or "Аноним") if user else "Аноним"
+    chat_history[chat_id].append({"name": sender_name, "text": text})
+
+    # --- Обработка упоминания бота ---
+    if is_mention(text):
+        question = re.sub(rf"@{BOT_USERNAME}", "", text, flags=re.IGNORECASE).strip()
+        if not question:
+            question = "прокомментируй это"
+
+        context_msgs = []
+
+        # Вариант 1: реплай на сообщение — берём текст того сообщения
+        if update.message.reply_to_message:
+            replied = update.message.reply_to_message
+            replied_text = (replied.text or replied.caption or "").strip()
+            replied_name = (replied.from_user.first_name or "Аноним") if replied.from_user else "Аноним"
+            if replied_text:
+                context_msgs = [{"name": replied_name, "text": replied_text}]
+                logger.info(f"Контекст из реплая: {replied_name}: {replied_text[:50]}...")
+
+        # Вариант 2: нет реплая — берём последние сообщения из истории (кроме текущего)
+        else:
+            history = list(chat_history[chat_id])
+            # Убираем текущее сообщение (оно уже добавлено выше)
+            context_msgs = history[:-1][-10:]  # последние 10 перед текущим
+            logger.info(f"Контекст из истории: {len(context_msgs)} сообщений")
+
+        logger.info(f"Вопрос боту от {sender_name}: {question}")
+
+        try:
+            answer = await asyncio.to_thread(ask_gemini, question, context_msgs)
+            await update.message.reply_text(answer)
+        except Exception as e:
+            logger.error(f"Ошибка Gemini API: {e}")
+            await update.message.reply_text("❌ Не смог ответить, попробуй позже.")
+        return
+
+    # --- Реакция на любое сообщение с шансом 4% ---
     if random.random() < 0.04:
         try:
             await update.message.set_reaction(
@@ -157,6 +247,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not is_valid_url(text):
         return
 
+    # --- Скачивание видео ---
     msg = await update.message.reply_text("⏳ Завозик...")
     tmp_dir = tempfile.mkdtemp(prefix="yt_")
     filename = None
@@ -194,7 +285,6 @@ def main() -> None:
     logger.info("Бот запускается...")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.bot_data["download_semaphore"] = asyncio.Semaphore(3)
 
     app.add_handler(

@@ -40,10 +40,7 @@ TARGET_USER_ID = 5002964279
 GIF_FILE = "CgACAgIAAxkBAAFD2mlpqH5Qrh_vFdkM_rbmUEJP3sJu6gAC3HYAAkciUEi9sy6F7yG9WToE"
 REACTIONS = ["🔥", "👀", "🤡", "💯"]
 
-message_counter: dict[int, int] = defaultdict(int)
 chat_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=100))
-
-CHAT_HISTORY_MAX_CHATS = 200
 
 DOWNLOADS_DIR = os.path.join(tempfile.gettempdir(), "zavozbot_dl")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
@@ -245,11 +242,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     text = (update.message.text or update.message.caption or "").strip()
 
-    message_counter[chat_id] += 1
-    if message_counter[chat_id] >= 100:
-        message_counter[chat_id] = 0
-        await update.message.reply_text("а я считаю это желтуха")
-
     if user and user.id == TARGET_USER_ID:
         if random.random() < 0.01:
             try:
@@ -284,7 +276,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 context_msgs = [{"name": replied_name, "text": replied_text}]
         else:
             history = list(chat_history[chat_id])
-            context_msgs = history[:-1][-10:]
+            context_msgs = history[:-1][-20:]
 
         image_b64, image_mime = await get_photo_base64(update, context)
 

@@ -115,11 +115,15 @@ def ask_ai(question: str, context_messages: list[dict], image_base64: str = None
 
     messages.append({"role": "user", "content": user_content})
 
+    # Если есть фото — используем Llama 4 Scout (поддерживает изображения)
+    # Для текста — Qwen3-32b (умнее в рассуждениях)
+    model = "meta-llama/llama-4-scout-17b-16e-instruct" if image_base64 else "qwen/qwen3-32b"
+    
     last_exception = None
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model=model,
                 messages=messages,
                 max_tokens=1000,
             )

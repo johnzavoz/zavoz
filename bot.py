@@ -6,10 +6,11 @@ import asyncio
 import shutil
 import tempfile
 import base64
+import time
 from collections import defaultdict, deque
 from dotenv import load_dotenv
 from telegram import Update, ReactionTypeEmoji, ReplyParameters
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes, Application
 
 import yt_dlp
 from groq import Groq
@@ -33,17 +34,30 @@ if not GROQ_API_KEY:
 
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "zavozik")
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY, timeout=30.0)
 
 TARGET_USER_ID = 5002964279
 GIF_FILE = "CgACAgIAAxkBAAFD2mlpqH5Qrh_vFdkM_rbmUEJP3sJu6gAC3HYAAkciUEi9sy6F7yG9WToE"
 REACTIONS = ["🔥", "👀", "🤡", "💯"]
 
 message_counter: dict[int, int] = defaultdict(int)
-chat_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=300))
+chat_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=100))
+
+CHAT_HISTORY_MAX_CHATS = 200
+
+DOWNLOADS_DIR = os.path.join(tempfile.gettempdir(), "zavozbot_dl")
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+
+download_cache: dict[str, asyncio.Event] = {}
+download_results: dict[str, tuple] = {}
+download_lock = asyncio.Lock()
+
+SUMMARY_MAX_CHARS = 12_000
 
 URL_PATTERN = re.compile(
-    r'https?://(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|instagram\.com/(reels?|p)/|twitter\.com|x\.com|youtube\.com|youtu\.be)'
+    r'https?://(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com'
+    r'|instagram\.com/(reels?|p|tv|stories)/|twitter\.com|x\.com'
+    r'|youtube\.com|youtu\.be)'
 )
 
 SYSTEM_PROMPT = """Ты — Завозик, остроумный и edgy саркастичный участник чата. 
@@ -68,7 +82,6 @@ def is_mention(text: str) -> bool:
 
 
 def ask_ai(question: str, context_messages: list[dict], image_base64: str = None, image_mime: str = "image/jpeg") -> str:
-    """Отправляет вопрос в Groq с контекстом переписки и опциональным изображением."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     if context_messages:
@@ -99,12 +112,33 @@ def ask_ai(question: str, context_messages: list[dict], image_base64: str = None
 
     messages.append({"role": "user", "content": user_content})
 
-    response = groq_client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=messages,
-        max_tokens=1000,
-    )
-    return response.choices[0].message.content.strip()
+    last_exception = None
+    for attempt in range(3):
+        try:
+            response = groq_client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=messages,
+                max_tokens=1000,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            last_exception = e
+            error_str = str(e).lower()
+            if attempt < 2 and any(x in error_str for x in ["429", "503", "rate limit", "overloaded", "too many requests"]):
+                wait = 2 ** attempt
+                logger.warning(f"Groq API перегружен (попытка {attempt + 1}/3), жду {wait}с...")
+                time.sleep(wait)
+                continue
+            break
+
+    raise last_exception
+
+
+def _match_filter(info_dict, *, incomplete):
+    duration = info_dict.get("duration")
+    if duration and duration > 600:
+        return f"Видео слишком длинное: {int(duration) // 60} мин. Максимум 10 минут."
+    return None
 
 
 def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
@@ -115,17 +149,13 @@ def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
         'merge_output_format': 'mp4',
         'socket_timeout': 30,
         'noplaylist': True,
+        'match_filter': _match_filter,
         'postprocessors': [{
             'key': 'FFmpegVideoConvertor',
             'preferedformat': 'mp4',
         }],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        duration = info.get("duration", 0)
-        if duration > 600:
-            raise ValueError(f"Видео слишком длинное: {duration // 60} мин. Максимум 10 минут.")
-
         info = ydl.extract_info(url, download=True)
 
         filename = None
@@ -178,7 +208,6 @@ async def send_video(filename: str, update: Update, info: dict) -> None:
 
 
 async def get_photo_base64(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple:
-    """Скачивает фото из сообщения или реплая и возвращает (base64, mime_type)."""
     msg = update.message
 
     photo = msg.photo
@@ -188,10 +217,19 @@ async def get_photo_base64(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not photo:
         return None, None
 
-    file = await context.bot.get_file(photo[-1].file_id)
+    mid = min(1, len(photo) - 1)
+    file = await context.bot.get_file(photo[mid].file_id)
     file_bytes = await file.download_as_bytearray()
     encoded = base64.b64encode(file_bytes).decode("utf-8")
     return encoded, "image/jpeg"
+
+
+def _trim_chat_history():
+    if len(chat_history) > CHAT_HISTORY_MAX_CHATS:
+        keys_to_remove = list(chat_history.keys())[:len(chat_history) - CHAT_HISTORY_MAX_CHATS]
+        for k in keys_to_remove:
+            del chat_history[k]
+            message_counter.pop(k, None)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,15 +238,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     chat_id = update.message.chat_id
     user = update.message.from_user
+
     text = (update.message.text or update.message.caption or "").strip()
 
-    # --- Счётчик сообщений ---
     message_counter[chat_id] += 1
-    if message_counter[chat_id] >= 150:
+    if message_counter[chat_id] >= 100:
         message_counter[chat_id] = 0
         await update.message.reply_text("а я считаю это желтуха")
 
-    # --- Гифка целевому пользователю с шансом 1% ---
     if user and user.id == TARGET_USER_ID:
         if random.random() < 0.01:
             try:
@@ -219,19 +256,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception as e:
                 logger.warning(f"Не удалось отправить гифку: {e}")
 
-    # --- Сохраняем сообщение в историю чата ---
     sender_name = (user.first_name or "Аноним") if user else "Аноним"
     if text:
         chat_history[chat_id].append({"name": sender_name, "text": text})
+        _trim_chat_history()
 
     is_private = update.message.chat.type == "private"
     has_mention = is_mention(text)
     has_photo = bool(update.message.photo)
     replied_has_photo = bool(update.message.reply_to_message and update.message.reply_to_message.photo)
 
-    # --- Обработка упоминания бота (с фото или без) ---
-    # В личке отвечаем всегда, в группе только по тегу/слову
-    # Если есть валидная ссылка — не триггерим AI, пусть скачивает
     if (has_mention or is_private) and not is_valid_url(text):
         question = re.sub(rf"@{BOT_USERNAME}", "", text, flags=re.IGNORECASE).strip()
         if not question:
@@ -253,8 +287,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.info(f"Вопрос боту от {sender_name}: {question}, фото: {image_b64 is not None}")
 
         try:
-            answer = await asyncio.to_thread(ask_ai, question, context_msgs, image_b64, image_mime)
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(ask_ai, question, context_msgs, image_b64, image_mime),
+                timeout=45.0,
+            )
             await update.message.reply_text(answer)
+        except asyncio.TimeoutError:
+            logger.error("Таймаут Groq API")
+            await update.message.reply_text("❌ Groq завис, попробуй позже.")
         except Exception as e:
             logger.error(f"Ошибка Groq API: {e}")
             await update.message.reply_text("❌ Не смог ответить, попробуй позже.")
@@ -263,50 +303,132 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not text:
         return
 
-    # --- Реакция на любое сообщение с шансом 4% ---
-    if random.random() < 0.04:
+    # --- Реакция 👀 на каждое сообщение со ссылкой ---
+    if is_valid_url(text):
         try:
-            await update.message.set_reaction(
-                [ReactionTypeEmoji(emoji=random.choice(REACTIONS))]
-            )
+            await update.message.set_reaction([ReactionTypeEmoji(emoji="👀")])
         except Exception as e:
-            logger.warning(f"Не удалось поставить реакцию: {e}")
+            logger.warning(f"Не удалось поставить реакцию на ссылку: {e}")
+    else:
+        # --- Случайная реакция на обычные сообщения с шансом 4% ---
+        if random.random() < 0.04:
+            try:
+                await update.message.set_reaction(
+                    [ReactionTypeEmoji(emoji=random.choice(REACTIONS))]
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось поставить реакцию: {e}")
 
     if not is_valid_url(text):
         return
 
-    # --- Скачивание видео ---
+    url_match = URL_PATTERN.search(text)
+    url = url_match.group(0) if url_match else text
+
+    async with download_lock:
+        if url in download_cache:
+            event = download_cache[url]
+            is_duplicate = True
+        else:
+            event = asyncio.Event()
+            download_cache[url] = event
+            is_duplicate = False
+
+    if is_duplicate:
+        logger.info(f"Дубликат URL, ждём результата: {url}")
+        msg = await update.message.reply_text("⏳ Уже скачиваю для кого-то, подожди...")
+        try:
+            await asyncio.wait_for(asyncio.shield(event.wait()), timeout=130)
+        except asyncio.TimeoutError:
+            await msg.edit_text("❌ Скачивание заняло слишком долго.")
+            return
+
+        result = download_results.get(url)
+        if result and result[0] is not None:
+            filename, info = result
+            try:
+                await send_video(filename, update, info)
+                await msg.delete()
+            except Exception as e:
+                logger.error(f"Ошибка при отправке дубликата: {e}")
+                await msg.edit_text("❌ Не удалось отправить видео.")
+        else:
+            exc = result[1] if result else None
+            err_text = _error_text(exc)
+            await msg.edit_text(err_text)
+        return
+
     msg = await update.message.reply_text("⏳ Завозик...")
     tmp_dir = tempfile.mkdtemp(prefix="yt_")
     filename = None
     try:
         download_semaphore = context.bot_data.get("download_semaphore")
+
+        if download_semaphore.locked():
+            await msg.edit_text("⏳ В очереди, скоро начну...")
+
         async with download_semaphore:
+            await msg.edit_text("⏳ Завозик...")
             filename, info = await asyncio.wait_for(
-                asyncio.to_thread(download_video, text, tmp_dir),
+                asyncio.to_thread(download_video, url, tmp_dir),
                 timeout=120,
             )
 
         if filename and os.path.exists(filename):
+            persistent_path = os.path.join(DOWNLOADS_DIR, os.path.basename(filename))
+            shutil.move(filename, persistent_path)
+            filename = persistent_path
+            download_results[url] = (filename, info)
             await send_video(filename, update, info)
         else:
             logger.error(f"Файл не найден после скачивания: {filename}")
+            download_results[url] = (None, FileNotFoundError("Файл не найден"))
             await msg.edit_text("❌ Не удалось найти скачанный файл.")
             return
 
-    except asyncio.TimeoutError:
-        logger.error(f"Таймаут при скачивании [{text}]")
+    except asyncio.TimeoutError as e:
+        logger.error(f"Таймаут при скачивании [{url}]")
+        download_results[url] = (None, e)
         await msg.edit_text("❌ Скачивание заняло слишком долго, попробуй позже.")
     except Exception as e:
-        logger.error(f"Ошибка при скачивании или отправке [{text}]: {e}")
-        await msg.edit_text("❌ Не удалось скачать видео.")
+        logger.error(f"Ошибка при скачивании или отправке [{url}]: {e}")
+        download_results[url] = (None, e)
+        err_text = _error_text(e)
+        await msg.edit_text(err_text)
     finally:
+        event.set()
+        asyncio.get_running_loop().call_later(300, _cleanup_download_cache, url)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         logger.info(f"Временная папка удалена: {tmp_dir}")
         try:
             await msg.delete()
         except Exception as e:
             logger.warning(f"Не удалось удалить сообщение-статус: {e}")
+
+
+def _error_text(exc: Exception | None) -> str:
+    if exc is None:
+        return "❌ Не удалось скачать видео."
+    msg = str(exc).lower()
+    if "instagram" in msg or "login" in msg or "cookies" in msg:
+        return "❌ Instagram требует авторизацию — не могу скачать этот пост."
+    if "too long" in msg or "слишком длинное" in msg:
+        return f"❌ {exc}"
+    if "private" in msg:
+        return "❌ Приватное видео, недоступно."
+    if "timeout" in msg or isinstance(exc, asyncio.TimeoutError):
+        return "❌ Скачивание заняло слишком долго, попробуй позже."
+    return "❌ Не удалось скачать видео."
+
+
+def _cleanup_download_cache(url: str):
+    result = download_results.pop(url, None)
+    download_cache.pop(url, None)
+    if result and result[0] and os.path.exists(result[0]):
+        try:
+            os.remove(result[0])
+        except OSError:
+            pass
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -318,6 +440,8 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     history_text = "\n".join(f"{m['name']}: {m['text']}" for m in history)
+    if len(history_text) > SUMMARY_MAX_CHARS:
+        history_text = history_text[-SUMMARY_MAX_CHARS:]
 
     prompt = f"""Вот переписка из чата за последнее время. Сделай краткое саммари — о чём говорили, какие темы поднимались, были ли споры или важные моменты. Без лишней воды.
 
@@ -325,17 +449,33 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 {history_text}"""
 
     try:
-        answer = await asyncio.to_thread(ask_ai, prompt, [])
+        answer = await asyncio.wait_for(
+            asyncio.to_thread(ask_ai, prompt, []),
+            timeout=45.0,
+        )
         await update.message.reply_text(f"📋 Саммари чата ({len(history)} сообщений):\n\n{answer}")
+    except asyncio.TimeoutError:
+        await update.message.reply_text("❌ Groq завис, попробуй позже.")
     except Exception as e:
         logger.error(f"Ошибка саммари: {e}")
         await update.message.reply_text("❌ Не смог сделать саммари.")
 
 
+async def post_shutdown(app: Application) -> None:
+    logger.info("Остановка бота, чищу persistent файлы...")
+    for url in list(download_results.keys()):
+        _cleanup_download_cache(url)
+    shutil.rmtree(DOWNLOADS_DIR, ignore_errors=True)
+
+
 def main() -> None:
     logger.info("Бот запускается...")
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    if os.path.exists(DOWNLOADS_DIR):
+        shutil.rmtree(DOWNLOADS_DIR, ignore_errors=True)
+    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+
+    app = ApplicationBuilder().token(BOT_TOKEN).post_shutdown(post_shutdown).build()
     app.bot_data["download_semaphore"] = asyncio.Semaphore(3)
 
     app.add_handler(CommandHandler("summary", summary_command))

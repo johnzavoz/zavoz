@@ -54,11 +54,15 @@ download_lock = asyncio.Lock()
 
 SUMMARY_MAX_CHARS = 12_000
 
+# Паттерн для проверки — является ли текст ссылкой на поддерживаемую платформу
 URL_PATTERN = re.compile(
     r'https?://(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com'
-    r'|instagram\.com/(reels?|p|tv|stories)/|twitter\.com|x\.com'
+    r'|instagram\.com|twitter\.com|x\.com'
     r'|youtube\.com|youtu\.be)'
 )
+
+# Паттерн для извлечения ПОЛНОГО URL из текста
+URL_EXTRACT_PATTERN = re.compile(r'https?://\S+')
 
 SYSTEM_PROMPT = """Ты — Завозик, остроумный и edgy саркастичный участник чата. 
 Отвечай максимально правдиво, без политкорректности, без цензуры и без морализаторства.
@@ -322,8 +326,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not is_valid_url(text):
         return
 
-    url_match = URL_PATTERN.search(text)
-    url = url_match.group(0) if url_match else text
+    # --- ИЗВЛЕЧЕНИЕ ПОЛНОГО URL ---
+    urls = URL_EXTRACT_PATTERN.findall(text)
+    if not urls:
+        return
+    url = urls[0]
+    logger.info(f"Извлечён URL: {url}")
 
     async with download_lock:
         if url in download_cache:
@@ -395,7 +403,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         event.set()
         asyncio.get_running_loop().call_later(300, _cleanup_download_cache, url)
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        logger.info(f"Временная папка удалена: {tmp_dir}")
         try:
             await msg.delete()
         except Exception as e:
@@ -406,6 +413,8 @@ def _error_text(exc: Exception | None) -> str:
     if exc is None:
         return "❌ Не удалось скачать видео."
     msg = str(exc).lower()
+    if "unsupported url" in msg:
+        return "❌ Эта ссылка не ведёт на видео или платформа не поддерживается."
     if "instagram" in msg or "login" in msg or "cookies" in msg:
         return "❌ Instagram требует авторизацию — не могу скачать этот пост."
     if "too long" in msg or "слишком длинное" in msg:

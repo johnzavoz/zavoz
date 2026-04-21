@@ -42,6 +42,8 @@ REACTIONS = ["🔥", "👀", "🤡", "💯"]
 
 chat_history: dict[int, deque] = defaultdict(lambda: deque(maxlen=100))
 
+CHAT_HISTORY_MAX_CHATS = 200
+
 DOWNLOADS_DIR = os.path.join(tempfile.gettempdir(), "zavozbot_dl")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
@@ -230,7 +232,6 @@ def _trim_chat_history():
         keys_to_remove = list(chat_history.keys())[:len(chat_history) - CHAT_HISTORY_MAX_CHATS]
         for k in keys_to_remove:
             del chat_history[k]
-            message_counter.pop(k, None)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

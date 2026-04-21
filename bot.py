@@ -364,11 +364,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         download_semaphore = context.bot_data.get("download_semaphore")
 
-        if download_semaphore.locked():
-            await msg.edit_text("⏳ В очереди, скоро начну...")
-
         async with download_semaphore:
-            await msg.edit_text("⏳ Завозик...")
             filename, info = await asyncio.wait_for(
                 asyncio.to_thread(download_video, url, tmp_dir),
                 timeout=120,

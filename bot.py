@@ -7,11 +7,13 @@ import shutil
 import tempfile
 import base64
 import time
+import json
 from collections import defaultdict, deque
 from dotenv import load_dotenv
 from telegram import Update, ReactionTypeEmoji, ReplyParameters
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes, Application
 
+import httpx
 import yt_dlp
 from groq import Groq
 
@@ -34,6 +36,11 @@ if not GROQ_API_KEY:
 
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "zavozik")
 
+TWITCH_CLIENT_ID = os.environ.get("TWITCH_CLIENT_ID")
+TWITCH_CLIENT_SECRET = os.environ.get("TWITCH_CLIENT_SECRET")
+if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+    logger.warning("TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET не заданы — уведомления о Twitch-стримах отключены.")
+
 groq_client = Groq(api_key=GROQ_API_KEY, timeout=30.0)
 
 TARGET_USER_ID = 5002964279
@@ -52,6 +59,9 @@ download_results: dict[str, tuple] = {}
 download_lock = asyncio.Lock()
 
 SUMMARY_MAX_CHARS = 12_000
+
+TWITCH_CHECK_INTERVAL = 90  # секунд между проверками статуса стримеров
+TWITCH_SUBS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "twitch_subs.json")
 
 # Паттерн для проверки — является ли текст ссылкой на поддерживаемую платформу
 URL_PATTERN = re.compile(
@@ -431,6 +441,175 @@ def _cleanup_download_cache(url: str):
             pass
 
 
+# ============================== Twitch ==============================
+
+# {"streamer_login": [chat_id1, chat_id2, ...]}
+_twitch_subs_lock = asyncio.Lock()
+_twitch_token: dict = {"access_token": None, "expires_at": 0.0}
+_twitch_live_status: dict[str, bool] = {}  # login -> сейчас в эфире или нет
+
+
+def _load_twitch_subs() -> dict[str, list[int]]:
+    if not os.path.exists(TWITCH_SUBS_FILE):
+        return {}
+    try:
+        with open(TWITCH_SUBS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Не удалось прочитать {TWITCH_SUBS_FILE}: {e}")
+        return {}
+
+
+def _save_twitch_subs(subs: dict[str, list[int]]) -> None:
+    try:
+        with open(TWITCH_SUBS_FILE, "w", encoding="utf-8") as f:
+            json.dump(subs, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить {TWITCH_SUBS_FILE}: {e}")
+
+
+twitch_subs: dict[str, list[int]] = _load_twitch_subs()
+
+
+async def get_twitch_token() -> str | None:
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        return None
+    if _twitch_token["access_token"] and time.time() < _twitch_token["expires_at"] - 60:
+        return _twitch_token["access_token"]
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            "https://id.twitch.tv/oauth2/token",
+            params={
+                "client_id": TWITCH_CLIENT_ID,
+                "client_secret": TWITCH_CLIENT_SECRET,
+                "grant_type": "client_credentials",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _twitch_token["access_token"] = data["access_token"]
+        _twitch_token["expires_at"] = time.time() + data.get("expires_in", 3600)
+        return _twitch_token["access_token"]
+
+
+async def fetch_live_streams(logins: list[str]) -> dict[str, dict]:
+    """Возвращает {login: stream_info} только для тех, кто сейчас в эфире."""
+    if not logins:
+        return {}
+    token = await get_twitch_token()
+    if not token:
+        return {}
+
+    live: dict[str, dict] = {}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        # Twitch допускает до 100 user_login за один запрос
+        for i in range(0, len(logins), 100):
+            chunk = logins[i:i + 100]
+            params = [("user_login", login) for login in chunk]
+            resp = await client.get(
+                "https://api.twitch.tv/helix/streams",
+                params=params,
+                headers={
+                    "Client-Id": TWITCH_CLIENT_ID,
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+            resp.raise_for_status()
+            for item in resp.json().get("data", []):
+                live[item["user_login"].lower()] = item
+    return live
+
+
+async def twitch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        await update.message.reply_text("❌ Twitch-интеграция не настроена (нет TWITCH_CLIENT_ID/SECRET).")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /twitch <ник_стримера>")
+        return
+
+    login = context.args[0].lower().lstrip("@")
+    chat_id = update.message.chat_id
+
+    async with _twitch_subs_lock:
+        subs = twitch_subs.setdefault(login, [])
+        if chat_id in subs:
+            await update.message.reply_text(f"Уже подписан на {login} 🤙")
+            return
+        subs.append(chat_id)
+        _save_twitch_subs(twitch_subs)
+
+    await update.message.reply_text(f"✅ Буду присылать сюда сообщение, когда {login} начнёт стрим на Twitch.")
+
+
+async def untwitch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Использование: /untwitch <ник_стримера>")
+        return
+
+    login = context.args[0].lower().lstrip("@")
+    chat_id = update.message.chat_id
+
+    async with _twitch_subs_lock:
+        subs = twitch_subs.get(login, [])
+        if chat_id not in subs:
+            await update.message.reply_text(f"Ты не подписан на {login}.")
+            return
+        subs.remove(chat_id)
+        if not subs:
+            twitch_subs.pop(login, None)
+        _save_twitch_subs(twitch_subs)
+
+    await update.message.reply_text(f"🚫 Отписал от {login}.")
+
+
+async def twitchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.message.chat_id
+    mine = [login for login, subs in twitch_subs.items() if chat_id in subs]
+    if not mine:
+        await update.message.reply_text("Нет подписок на Twitch-стримеров.")
+        return
+    await update.message.reply_text("Твои подписки на Twitch:\n" + "\n".join(f"• {l}" for l in mine))
+
+
+async def check_twitch_streams(context: ContextTypes.DEFAULT_TYPE) -> None:
+    logins = list(twitch_subs.keys())
+    if not logins:
+        return
+
+    try:
+        live_now = await fetch_live_streams(logins)
+    except Exception as e:
+        logger.warning(f"Ошибка проверки статуса Twitch: {e}")
+        return
+
+    for login in logins:
+        was_live = _twitch_live_status.get(login, False)
+        is_live = login in live_now
+        _twitch_live_status[login] = is_live
+
+        if is_live and not was_live:
+            stream = live_now[login]
+            title = stream.get("title", "")
+            game = stream.get("game_name", "")
+            text = f"🔴 {login} начал стрим на Twitch!"
+            if title:
+                text += f"\n{title}"
+            if game:
+                text += f"\nИгра: {game}"
+            text += f"\nhttps://twitch.tv/{login}"
+
+            for chat_id in twitch_subs.get(login, []):
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=text)
+                except Exception as e:
+                    logger.warning(f"Не удалось отправить уведомление о стриме {login} в {chat_id}: {e}")
+
+
+# ============================ /Twitch ================================
+
+
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.message.chat_id
     history = list(chat_history[chat_id])
@@ -479,9 +658,19 @@ def main() -> None:
     app.bot_data["download_semaphore"] = asyncio.Semaphore(3)
 
     app.add_handler(CommandHandler("summary", summary_command))
+    app.add_handler(CommandHandler("twitch", twitch_command))
+    app.add_handler(CommandHandler("untwitch", untwitch_command))
+    app.add_handler(CommandHandler("twitchlist", twitchlist_command))
     app.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND, handle_message)
     )
+
+    if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
+        app.job_queue.run_repeating(
+            check_twitch_streams, interval=TWITCH_CHECK_INTERVAL, first=10
+        )
+        logger.info(f"Проверка Twitch-стримов каждые {TWITCH_CHECK_INTERVAL}с")
+
     print("✅ Бот запущен. Нажми Ctrl+C чтобы остановить.")
     logger.info("Бот запущен")
     app.run_polling(drop_pending_updates=True)

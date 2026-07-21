@@ -1,6 +1,7 @@
-python-telegram-bot
 yt-dlp
 ffmpeg-python
 python-dotenv
 requests
 groq
+python-telegram-bot[job-queue]
+httpx

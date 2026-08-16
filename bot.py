@@ -60,7 +60,12 @@ download_lock = asyncio.Lock()
 SUMMARY_MAX_CHARS = 12_000
 
 TWITCH_CHECK_INTERVAL = 90  # секунд между проверками статуса стримеров
-TWITCH_SUBS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "twitch_subs.json")
+_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+os.makedirs(_DATA_DIR, exist_ok=True)
+TWITCH_SUBS_FILE = os.environ.get(
+    "TWITCH_SUBS_FILE",
+    os.path.join(_DATA_DIR, "twitch_subs.json"),
+)
 
 # Паттерн для проверки — является ли текст ссылкой на поддерживаемую платформу
 URL_PATTERN = re.compile(
@@ -633,6 +638,7 @@ async def post_shutdown(app: Application) -> None:
 
 def main() -> None:
     logger.info("Бот запускается...")
+    logger.info(f"Файл подписок Twitch: {TWITCH_SUBS_FILE}")
 
     if os.path.exists(DOWNLOADS_DIR):
         shutil.rmtree(DOWNLOADS_DIR, ignore_errors=True)

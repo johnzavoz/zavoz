@@ -5,7 +5,6 @@ import random
 import asyncio
 import shutil
 import tempfile
-import base64
 import time
 import json
 from collections import defaultdict, deque
@@ -94,7 +93,7 @@ def is_mention(text: str) -> bool:
     return f"@{BOT_USERNAME}".lower() in t or "завоз" in t or "завозик" in t
 
 
-def ask_ai(question: str, context_messages: list[dict], image_base64: str = None, image_mime: str = "image/jpeg") -> str:
+def ask_ai(question: str, context_messages: list[dict]) -> str:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     if context_messages:
@@ -110,28 +109,13 @@ def ask_ai(question: str, context_messages: list[dict], image_base64: str = None
             "content": "Понял контекст, жду вопрос."
         })
 
-    if image_base64:
-        user_content = [
-            {"type": "text", "text": question},
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{image_mime};base64,{image_base64}"
-                }
-            }
-        ]
-    else:
-        user_content = question
+    messages.append({"role": "user", "content": question})
 
-    messages.append({"role": "user", "content": user_content})
-
-    model = "meta-llama/llama-4-scout-17b-16e-instruct" if image_base64 else "llama-3.3-70b-versatile"
-    
     last_exception = None
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model=model,
+                model="llama-3.3-70b-versatile",
                 messages=messages,
                 max_tokens=1500,
             )
@@ -157,42 +141,76 @@ def _match_filter(info_dict, *, incomplete):
 
 
 def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
-    ydl_opts = {
+    base_opts = {
         'outtmpl': os.path.join(tmp_dir, '%(id)s.%(ext)s'),
         'format': 'best[ext=mp4][filesize<50M]/best[filesize<50M]/best',
         'quiet': True,
         'merge_output_format': 'mp4',
         'socket_timeout': 30,
         'noplaylist': True,
+        # Если реплай в X цитирует/отвечает на твит с видео, экстрактор иногда
+        # отдаёт это как "плейлист" из двух видео (родительский твит + текущий).
+        # Ограничиваем скачивание только первым (целевым) видео по ссылке.
+        'playlist_items': '1',
         'match_filter': _match_filter,
         'postprocessors': [{
             'key': 'FFmpegVideoConvertor',
             'preferedformat': 'mp4',
         }],
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
 
-        filename = None
-        if "requested_downloads" in info and info["requested_downloads"]:
-            filename = info["requested_downloads"][0].get("filepath")
+    is_twitter = 'twitter.com' in url or 'x.com' in url
 
-        if not filename:
-            filename = ydl.prepare_filename(info)
+    # У X (Twitter) есть два способа извлечения: syndication (без авторизации,
+    # обычно стабильнее на реплаях) и graphql (дефолтный в yt-dlp, иногда падает
+    # именно на tweet'ах-реплаях). Пробуем syndication первым, если не вышло — graphql.
+    attempts = [{'twitter': {'api': ['syndication']}}, {'twitter': {'api': ['graphql']}}] if is_twitter else [None]
 
-        if not os.path.exists(filename):
-            base = os.path.splitext(filename)[0]
-            for ext in ('mp4', 'mkv', 'webm', 'mov'):
-                candidate = f"{base}.{ext}"
-                if os.path.exists(candidate):
-                    filename = candidate
-                    break
+    last_exception = None
+    for extractor_args in attempts:
+        ydl_opts = dict(base_opts)
+        if extractor_args:
+            ydl_opts['extractor_args'] = extractor_args
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            break
+        except Exception as e:
+            last_exception = e
+            continue
+    else:
+        raise last_exception
 
-        if not os.path.exists(filename):
-            raise FileNotFoundError(f"Файл не найден после скачивания: {filename}")
+    # Если результат оказался "плейлистом" (см. комментарий выше про X/реплаи),
+    # метаданные (длительность, размеры) берём из фактически скачанного элемента.
+    if info.get('entries'):
+        entries = [e for e in info['entries'] if e]
+        if entries:
+            entry = entries[0]
+            for key in ('duration', 'width', 'height', 'id', 'title'):
+                if info.get(key) is None and entry.get(key) is not None:
+                    info[key] = entry[key]
 
-        if os.path.getsize(filename) < 1024:
-            raise ValueError("Скачанный файл подозрительно маленький (< 1 КБ)")
+    filename = None
+    if "requested_downloads" in info and info["requested_downloads"]:
+        filename = info["requested_downloads"][0].get("filepath")
+
+    if not filename:
+        filename = ydl.prepare_filename(info)
+
+    if not os.path.exists(filename):
+        base = os.path.splitext(filename)[0]
+        for ext in ('mp4', 'mkv', 'webm', 'mov'):
+            candidate = f"{base}.{ext}"
+            if os.path.exists(candidate):
+                filename = candidate
+                break
+
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"Файл не найден после скачивания: {filename}")
+
+    if os.path.getsize(filename) < 1024:
+        raise ValueError("Скачанный файл подозрительно маленький (< 1 КБ)")
 
     return filename, info
 
@@ -220,23 +238,6 @@ async def send_video(filename: str, update: Update, info: dict) -> None:
                 document=f,
                 reply_parameters=reply_params,
             )
-
-
-async def get_photo_base64(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple:
-    msg = update.message
-
-    photo = msg.photo
-    if not photo and msg.reply_to_message and msg.reply_to_message.photo:
-        photo = msg.reply_to_message.photo
-
-    if not photo:
-        return None, None
-
-    mid = min(1, len(photo) - 1)
-    file = await context.bot.get_file(photo[mid].file_id)
-    file_bytes = await file.download_as_bytearray()
-    encoded = base64.b64encode(file_bytes).decode("utf-8")
-    return encoded, "image/jpeg"
 
 
 def _trim_chat_history():
@@ -272,13 +273,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     is_private = update.message.chat.type == "private"
     has_mention = is_mention(text)
-    has_photo = bool(update.message.photo)
-    replied_has_photo = bool(update.message.reply_to_message and update.message.reply_to_message.photo)
 
     if (has_mention or is_private) and not is_valid_url(text):
         question = re.sub(rf"@{BOT_USERNAME}", "", text, flags=re.IGNORECASE).strip()
         if not question:
-            question = "что на этом фото?" if (has_photo or replied_has_photo) else "прокомментируй это"
+            question = "прокомментируй это"
 
         context_msgs = []
         if update.message.reply_to_message:
@@ -291,13 +290,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             history = list(chat_history[chat_id])
             context_msgs = history[:-1][-20:]
 
-        image_b64, image_mime = await get_photo_base64(update, context)
-
-        logger.info(f"Вопрос боту от {sender_name}: {question}, фото: {image_b64 is not None}")
+        logger.info(f"Вопрос боту от {sender_name}: {question}")
 
         try:
             answer = await asyncio.wait_for(
-                asyncio.to_thread(ask_ai, question, context_msgs, image_b64, image_mime),
+                asyncio.to_thread(ask_ai, question, context_msgs),
                 timeout=45.0,
             )
             await update.message.reply_text(answer)
@@ -349,11 +346,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if is_duplicate:
         logger.info(f"Дубликат URL, ждём результата: {url}")
-        msg = await update.message.reply_text("⏳ Уже скачиваю для кого-то, подожди...")
         try:
             await asyncio.wait_for(asyncio.shield(event.wait()), timeout=130)
         except asyncio.TimeoutError:
-            await msg.edit_text("❌ Скачивание заняло слишком долго.")
+            logger.error(f"Таймаут ожидания дубликата [{url}]")
             return
 
         result = download_results.get(url)
@@ -361,17 +357,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             filename, info = result
             try:
                 await send_video(filename, update, info)
-                await msg.delete()
             except Exception as e:
                 logger.error(f"Ошибка при отправке дубликата: {e}")
-                await msg.edit_text("❌ Не удалось отправить видео.")
         else:
             exc = result[1] if result else None
-            err_text = _error_text(exc)
-            await msg.edit_text(err_text)
+            logger.error(f"Дубликат завершился с ошибкой [{url}]: {exc}")
         return
 
-    msg = await update.message.reply_text("⏳ Завозик...")
     tmp_dir = tempfile.mkdtemp(prefix="yt_")
     filename = None
     try:
@@ -392,26 +384,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             logger.error(f"Файл не найден после скачивания: {filename}")
             download_results[url] = (None, FileNotFoundError("Файл не найден"))
-            await msg.edit_text("❌ Не удалось найти скачанный файл.")
             return
 
     except asyncio.TimeoutError as e:
         logger.error(f"Таймаут при скачивании [{url}]")
         download_results[url] = (None, e)
-        await msg.edit_text("❌ Скачивание заняло слишком долго, попробуй позже.")
     except Exception as e:
         logger.error(f"Ошибка при скачивании или отправке [{url}]: {e}")
         download_results[url] = (None, e)
-        err_text = _error_text(e)
-        await msg.edit_text(err_text)
     finally:
         event.set()
         asyncio.get_running_loop().call_later(300, _cleanup_download_cache, url)
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        try:
-            await msg.delete()
-        except Exception as e:
-            logger.warning(f"Не удалось удалить сообщение-статус: {e}")
 
 
 def _error_text(exc: Exception | None) -> str:
@@ -593,7 +577,7 @@ async def check_twitch_streams(context: ContextTypes.DEFAULT_TYPE) -> None:
             stream = live_now[login]
             title = stream.get("title", "")
             game = stream.get("game_name", "")
-            text = f"🔴 {login} начал стрим на Twitch!"
+            text = f"🔴 {login} начал(а) ЗАВОЗИК на Twitch!"
             if title:
                 text += f"\n{title}"
             if game:

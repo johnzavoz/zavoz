@@ -365,7 +365,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await send_video(filename, update, info)
             except Exception as e:
                 logger.error(f"Ошибка при отправке дубликата: {e}")
-                await update.message.reply_text("❌ Не удалось отправить видео.")
+                await update.message.reply_text(_error_text(e))
         else:
             exc = result[1] if result else None
             logger.error(f"Дубликат завершился с ошибкой [{url}]: {exc}")
@@ -410,20 +410,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def _error_text(exc: Exception | None) -> str:
-    if exc is None:
-        return "я хочу пицы"
-    msg = str(exc).lower()
-    if "unsupported url" in msg:
-        return "я хочу пицы"
-    if "instagram" in msg or "login" in msg or "cookies" in msg:
-        return "я хочу пицы"
-    if "too long" in msg or "слишком длинное" in msg:
-        return f"❌ {exc}"
-    if "private" in msg:
-        return "я хочу пицы"
-    if "timeout" in msg or isinstance(exc, asyncio.TimeoutError):
-        return "я хочу пицы"
-    return "я хочу пицы"
+    return random.choice(["мам пицу", "я хочу пицы"])
 
 
 def _cleanup_download_cache(url: str):

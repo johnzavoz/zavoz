@@ -423,7 +423,7 @@ def _error_text(exc: Exception | None) -> str:
         return "я хочу пицы"
     if "timeout" in msg or isinstance(exc, asyncio.TimeoutError):
         return "я хочу пицы"
-    return "я хочу пицы."
+    return "я хочу пицы"
 
 
 def _cleanup_download_cache(url: str):

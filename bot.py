@@ -315,10 +315,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not text:
         return
 
-    # --- Реакция 👀 на каждое сообщение со ссылкой ---
+    # --- Реакция 🤡 на каждое сообщение со ссылкой ---
     if is_valid_url(text):
         try:
-            await update.message.set_reaction([ReactionTypeEmoji(emoji="👀")])
+            await update.message.set_reaction([ReactionTypeEmoji(emoji="🤡")])
         except Exception as e:
             logger.warning(f"Не удалось поставить реакцию на ссылку: {e}")
     else:
@@ -365,9 +365,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await send_video(filename, update, info)
             except Exception as e:
                 logger.error(f"Ошибка при отправке дубликата: {e}")
+                await update.message.reply_text("❌ Не удалось отправить видео.")
         else:
             exc = result[1] if result else None
             logger.error(f"Дубликат завершился с ошибкой [{url}]: {exc}")
+            await update.message.reply_text(_error_text(exc))
         return
 
     tmp_dir = tempfile.mkdtemp(prefix="yt_")
@@ -390,14 +392,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             logger.error(f"Файл не найден после скачивания: {filename}")
             download_results[url] = (None, FileNotFoundError("Файл не найден"))
+            await update.message.reply_text(_error_text(FileNotFoundError("Файл не найден")))
             return
 
     except asyncio.TimeoutError as e:
         logger.error(f"Таймаут при скачивании [{url}]")
         download_results[url] = (None, e)
+        await update.message.reply_text(_error_text(e))
     except Exception as e:
         logger.error(f"Ошибка при скачивании или отправке [{url}]: {e}")
         download_results[url] = (None, e)
+        await update.message.reply_text(_error_text(e))
     finally:
         event.set()
         asyncio.get_running_loop().call_later(300, _cleanup_download_cache, url)
@@ -406,19 +411,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def _error_text(exc: Exception | None) -> str:
     if exc is None:
-        return "❌ Не удалось скачать видео."
+        return "я хочу пицы"
     msg = str(exc).lower()
     if "unsupported url" in msg:
-        return "❌ Эта ссылка не ведёт на видео или платформа не поддерживается."
+        return "я хочу пицы"
     if "instagram" in msg or "login" in msg or "cookies" in msg:
-        return "❌ Instagram требует авторизацию — не могу скачать этот пост."
+        return "я хочу пицы"
     if "too long" in msg or "слишком длинное" in msg:
         return f"❌ {exc}"
     if "private" in msg:
-        return "❌ Приватное видео, недоступно."
+        return "я хочу пицы"
     if "timeout" in msg or isinstance(exc, asyncio.TimeoutError):
-        return "❌ Скачивание заняло слишком долго, попробуй позже."
-    return "❌ Не удалось скачать видео."
+        return "я хочу пицы"
+    return "я хочу пицы."
 
 
 def _cleanup_download_cache(url: str):
@@ -530,7 +535,7 @@ async def twitch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         subs.append(chat_id)
         _save_twitch_subs(twitch_subs)
 
-    await update.message.reply_text(f"✅ Буду присылать сюда сообщение, когда {login} начнёт стрим на Twitch.")
+    await update.message.reply_text(f"✅ Буду присылать сюда сообщение, когда {login} начнёт ЗАВОЗИК на Twitch.")
 
 
 async def untwitch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -583,7 +588,7 @@ async def check_twitch_streams(context: ContextTypes.DEFAULT_TYPE) -> None:
             stream = live_now[login]
             title = stream.get("title", "")
             game = stream.get("game_name", "")
-            text = f"🔴 {login} начал(а) ЗАВОЗИК на Twitch!"
+            text = f"🔴 {login} начал ЗАВОЗИК на Twitch!"
             if title:
                 text += f"\n{title}"
             if game:

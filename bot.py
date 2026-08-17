@@ -120,9 +120,10 @@ def ask_ai(question: str, context_messages: list[dict]) -> str:
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="qwen/qwen3.6-27b",
                 messages=messages,
                 max_tokens=1500,
+                reasoning_format="hidden",
             )
             return response.choices[0].message.content.strip()
         except Exception as e:

@@ -120,7 +120,7 @@ def ask_ai(question: str, context_messages: list[dict]) -> str:
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model="qwen/qwen3.6-27b",
+                model="openai/gpt-oss-120b",
                 messages=messages,
                 max_tokens=1500,
                 reasoning_format="hidden",
@@ -309,7 +309,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("❌ Groq завис, попробуй позже.")
         except Exception as e:
             logger.error(f"Ошибка Groq API: {e}")
-            await update.message.reply_text("❌ Не смог ответить, попробуй позже.")
+            await update.message.reply_text("я хочу пицы")
         return
 
     if not text:

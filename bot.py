@@ -149,13 +149,18 @@ def _match_filter(info_dict, *, incomplete):
 def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
     base_opts = {
         'outtmpl': os.path.join(tmp_dir, '%(id)s.%(ext)s'),
-        # bestvideo+bestaudio гарантирует, что звук не потеряется на видео,
-        # где видео- и аудиодорожки отдаются раздельно (например, часть роликов
-        # TikTok в высоком качестве). "best" в конце — фолбэк, если раздельных
-        # потоков нет и есть только один уже смешанный формат.
-        'format': 'bestvideo+bestaudio/best',
+        # Явно требуем формат, где УЖЕ есть и видео, и аудио в одном файле
+        # (acodec и vcodec оба не 'none'). Раньше "best" иногда выбирал
+        # видео-онли поток без звука (актуально для части роликов TikTok
+        # в высоком качестве). При этом мы НЕ используем bestvideo+bestaudio,
+        # так как склейка раздельных потоков требует ffmpeg, а на хостинге
+        # его установить не получается (система хостинга перезаписывает
+        # Dockerfile при каждом деплое). Такой селектор чинит потерю звука
+        # без ffmpeg, ценой того, что в очень редких случаях (когда у видео
+        # в принципе нет отдельного комбинированного формата) может быть
+        # выбрано более низкое качество, чем максимально доступное.
+        'format': 'best[acodec!=none][vcodec!=none]/best',
         'quiet': True,
-        'merge_output_format': 'mp4',
         'socket_timeout': 30,
         'noplaylist': True,
         # Если реплай в X цитирует/отвечает на твит с видео, экстрактор иногда
@@ -163,10 +168,6 @@ def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
         # Ограничиваем скачивание только первым (целевым) видео по ссылке.
         'playlist_items': '1',
         'match_filter': _match_filter,
-        'postprocessors': [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4',
-        }],
     }
 
     is_twitter = 'twitter.com' in url or 'x.com' in url

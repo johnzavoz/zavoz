@@ -149,7 +149,11 @@ def _match_filter(info_dict, *, incomplete):
 def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
     base_opts = {
         'outtmpl': os.path.join(tmp_dir, '%(id)s.%(ext)s'),
-        'format': 'best[ext=mp4][filesize<50M]/best[filesize<50M]/best',
+        # bestvideo+bestaudio гарантирует, что звук не потеряется на видео,
+        # где видео- и аудиодорожки отдаются раздельно (например, часть роликов
+        # TikTok в высоком качестве). "best" в конце — фолбэк, если раздельных
+        # потоков нет и есть только один уже смешанный формат.
+        'format': 'bestvideo+bestaudio/best',
         'quiet': True,
         'merge_output_format': 'mp4',
         'socket_timeout': 30,
@@ -215,8 +219,11 @@ def download_video(url: str, tmp_dir: str) -> tuple[str, dict]:
     if not os.path.exists(filename):
         raise FileNotFoundError(f"Файл не найден после скачивания: {filename}")
 
-    if os.path.getsize(filename) < 1024:
+    file_size = os.path.getsize(filename)
+    if file_size < 1024:
         raise ValueError("Скачанный файл подозрительно маленький (< 1 КБ)")
+    if file_size > 50 * 1024 * 1024:
+        raise ValueError("Видео слишком большое (> 50 МБ)")
 
     return filename, info
 
